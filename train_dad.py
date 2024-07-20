@@ -62,7 +62,7 @@ def test_model(epoch, model, test_dataloader):
 """
 
 	global best_ap
-	print("")
+	print("--")
 	model.eval()
 	total_correct, total, all_toa = 0, 0, []
  
@@ -108,9 +108,14 @@ def test_model(epoch, model, test_dataloader):
 		if torch.cuda.is_available():
 			torch.cuda.empty_cache()
 
+	print("all_probs_vid2 :",all_probs_vid2.shape)
+	print("all_y_vid :", all_y_vid.shape)
+	print("all_toa :", len(all_toa))
+
 	#Print the avergae precision 
 	avg_prec, curr_ttc, _ = evaluation(all_probs_vid2.numpy(), all_y_vid.numpy(), all_toa)    
 	avg_prec = 100 * avg_prec
+	print("Average Prec :-",avg_prec)
 
 	#Print the confusion matrix 
 	cf = confusion_matrix(all_y.numpy(), all_pred.numpy())
@@ -158,13 +163,14 @@ def main():
 		objmap_file=opt.obj_mapping_file,
 		training=False,
 	)
+
 	test_dataloader = DataLoader(test_dataset, batch_size=opt.test_video_batch_size, shuffle=False, num_workers=8)
 
 	# Define network
 	model = SpaceTempGoG_detr_dad(input_dim=opt.input_dim, embedding_dim=opt.embedding_dim, img_feat_dim=opt.img_feat_dim, num_classes=opt.num_classes).to(device)
 	print("Model -->",model)
 	
-	model.train()
+	model.train() ## Set the module in training mode.
 	
 	total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 	print(f"Total trainable parameters: {total_params}")
@@ -174,7 +180,9 @@ def main():
 		model.load_state_dict(torch.load(opt.checkpoint_model))
 
 	if bool(opt.test_only):
+		print("=== Test Only Mode ===")
 		test_model(0, model, test_dataloader)
+		print("== Test Model completed ==")
 
 	learning_rate = 1e-4
 	optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=5e-4)

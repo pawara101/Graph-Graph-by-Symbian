@@ -71,7 +71,7 @@ class Dataset(Dataset):
 				feature_paths += [os.path.join(dataset_path, "training", line)]
 			else: 
 				feature_paths += [os.path.join(dataset_path, "testing", line)]
-		
+		print("Feature paths :",feature_paths)
 		return feature_paths
 
 	def _frame_number(self, feat_path):
@@ -84,6 +84,7 @@ class Dataset(Dataset):
 		Integer of the frame number (temporal position of a frame in a video)
 		
 		"""
+		print("_frame_number :", int(feat_path.split('/')[-1].split('.mat')[0].split('_')[-1]))
 		return int(feat_path.split('/')[-1].split('.mat')[0].split('_')[-1])
 
 	def get_toa_all(self, annofile):
@@ -105,6 +106,8 @@ class Dataset(Dataset):
 			toa = np.where(labels == 1)[0][0]
 			toa = min(max(1, toa), self.n_frames-1) 
 			toa_dict[anno['vid']] = toa
+
+		print("get_toa_all :",toa_dict)
 		return toa_dict
 
 	def __getitem__(self, index):
