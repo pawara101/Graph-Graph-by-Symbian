@@ -1,254 +1,283 @@
-import glob
-import random
-import os
-import numpy as np
 import torch
+import numpy as np
+from models import *
+from dataset_dad import *
+from torch.utils.data import DataLoader
 
-from torch.utils.data import Dataset
+import argparse
+
+import torch.nn as nn
 import torch.nn.functional as F
-import torchvision.transforms as transforms
+from torchvision.utils import save_image
+
+from torch.optim.lr_scheduler import MultiStepLR
+
+from torchmetrics.functional import pairwise_cosine_similarity
 import scipy.io as io
-import json
 
-from torch_geometric.data import Data
-from torch_geometric.data import InMemoryDataset
+import sklearn
+from sklearn.metrics import confusion_matrix
+import matplotlib.pyplot as plt
 
-from nltk.tokenize import sent_tokenize, word_tokenize
-import spacy
-
+import time
+from eval_utils import evaluation
 from data.CausalityInTrafficAccident.loaderData import CausalityInTrafficAccident
+torch.manual_seed(0)  # 3407
 
-class Dataset(Dataset):
-    def __init__(self, dataset_path, img_dataset_path, split_path, ref_interval, objmap_file, training,
-                 frame_batch_size):
+parser = argparse.ArgumentParser()
 
-        """
-        Input:
-        dataset_path: Path to the video frames
-        img_dataset_path: Path to the I3D frame features
-        split_path: Path to the split files
-        ref_interval: Number of frames temporally connected in frame-level graph
-        objmap_file: The file mapping labels to label names for objects
-        annofile: File containing TOA annotations
-        training: Flag to determine train/test phase
 
-        """
+# Dataloader
+parser.add_argument('--dataset_ver', type=str, default='Mar9th')
+parser.add_argument('--use_flip', type=bool, default=False)
+parser.add_argument('--feature', type=str, default="i3d-rgb-x8")
+parser.add_argument('--input_size', type=int, default=1024)
 
-        self.training = training
-        self.img_dataset_path = img_dataset_path
-        self.feature_paths = self._extract_feature_paths(dataset_path, split_path, training)
-        self.transform = transforms.Compose([transforms.ToTensor(), ])
-        self.frame_batch_size = frame_batch_size
-        self.ref_interval = ref_interval
-        self.temporal_ref = 1
-        self.dilation_factor = 1
-        self.topk = 10
-        self.frame_stats_path = "data/dad/frames_stats"  # (height, width)
-        self.n_frames = 100
+opt = parser.parse_args()
+print("Arg Parsers : ", opt)
 
-        # Obj label to word embeddings
-        self.idx_to_classes_obj = json.load(open(objmap_file))
-        self.nlp = spacy.load('en_core_web_md', disable=['ner', 'parser'])
-        self.obj_embeddings = torch.from_numpy(np.array([self.nlp(obj).vector for obj in self.idx_to_classes_obj]))
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"Torch device : {device} ==")
+# Classification criterion
+cls_criterion = nn.CrossEntropyLoss().to(device)
 
-    def _extract_feature_paths(self, dataset_path, split_path="splits_ccd/", training=True):
+best_ap = -1
+n_frames = 100
 
-        """ Function to extract paths to frames given the specified train/test split
-        Input:
-        dataset_path: Path to the video frames
-        split_path: Path to the split files
-        training: Flag to determine train/test phase
 
-        Returns:
-        feature_paths: List of all the video paths in a split
+def test_model(epoch, model, test_dataloader):
+    """ Function to evaluate the model on the test data
+    Inputs:
+    epoch: training epoch number (0 if it is only testing)
+    model: trained model
+    test_dataloader: Dataloader for the testset
+"""
 
-        """
-        fn = "train_split.txt" if training else "test_split.txt"
-        split_path = os.path.join(split_path, fn)
-        with open(split_path) as file:
-            lines = file.read().splitlines()
-        feature_paths = []
+    global best_ap
+    print("--")
+    model.eval()
+    total_correct, total, all_toa = 0, 0, []
 
-        for line in lines:
-            if training:
-                feature_paths += [os.path.join(dataset_path, "training", line)]
+    for batch_i, (
+    X, edge_index, y_true, img_feat, video_adj_list, edge_embeddings, temporal_adj_list, obj_vis_feat, batch_vec,
+    toa) in enumerate(test_dataloader):
+
+        X = X.reshape(-1, X.shape[2])
+        img_feat = img_feat.reshape(-1, img_feat.shape[2])
+        edge_index = edge_index.reshape(-1, edge_index.shape[2])
+        edge_embeddings = edge_embeddings.view(-1, edge_embeddings.shape[-1])
+        video_adj_list = video_adj_list.reshape(-1, video_adj_list.shape[2])
+        temporal_adj_list = temporal_adj_list.reshape(-1, temporal_adj_list.shape[2])
+        y = y_true.reshape(-1)
+
+        obj_vis_feat = obj_vis_feat.reshape(-1, obj_vis_feat.shape[-1]).to(device)
+        feat_sim = pairwise_cosine_similarity(obj_vis_feat + 1e-7, obj_vis_feat + 1e-7)
+        temporal_edge_w = feat_sim[temporal_adj_list[0, :], temporal_adj_list[1, :]]
+        batch_vec = batch_vec.view(-1).long()
+
+        X, edge_index, y, img_feat, video_adj_list = X.to(device), edge_index.to(device), y.to(device), img_feat.to(
+            device), video_adj_list.to(device)
+        temporal_adj_list, temporal_edge_w, edge_embeddings, batch_vec = temporal_adj_list.to(
+            device), temporal_edge_w.to(device), edge_embeddings.to(device), batch_vec.to(device)
+        all_toa += [toa.item()]
+
+        with torch.no_grad():
+            logits, probs = model(X, edge_index, img_feat, video_adj_list, edge_embeddings, temporal_adj_list,
+                                  temporal_edge_w, batch_vec)
+
+        pred_labels = probs.argmax(1)
+
+        total_correct += (pred_labels == y).cpu().numpy().sum()
+        total += y.shape[0]
+
+        if batch_i == 0:
+            all_probs_vid2 = probs[:, 1].cpu().unsqueeze(0)
+            all_pred = pred_labels.cpu()
+            all_y = y.cpu()  # .unsqueeze(0)
+            all_y_vid = torch.max(y).unsqueeze(0).cpu()  # y.cpu() #.unsqueeze(0)
+        else:
+            all_probs_vid2 = torch.cat((all_probs_vid2, probs[:, 1].cpu().unsqueeze(0)))
+            all_pred = torch.cat((all_pred, pred_labels.cpu()))
+            all_y = torch.cat((all_y, y.cpu()))
+            all_y_vid = torch.cat((all_y_vid, torch.max(y).unsqueeze(0).cpu()))
+
+        # Empty cache
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    print("all_probs_vid2 :", all_probs_vid2.shape)
+    print("all_y_vid :", all_y_vid.shape)
+    print("all_toa :", len(all_toa))
+
+    # Print the avergae precision
+    avg_prec, curr_ttc, _ = evaluation(all_probs_vid2.numpy(), all_y_vid.numpy(), all_toa)
+    avg_prec = 100 * avg_prec
+    print("Average Prec :-", avg_prec)
+
+    # Print the confusion matrix
+    cf = confusion_matrix(all_y.numpy(), all_pred.numpy())
+    print(cf)
+
+    # class-wise accuracy
+    class_recall = cf.diagonal() / cf.sum(axis=1)
+    print(np.round(class_recall, 3))
+
+    if bool(opt.test_only):
+        exit(0)
+
+    # Saving checkpoint
+    if avg_prec > best_ap:
+        best_ap = avg_prec
+        os.makedirs("model_checkpoints/dad", exist_ok=True)
+        torch.save(model.state_dict(), f"model_checkpoints/dad/{model.__class__.__name__}_{epoch}.pth")
+        print(f"Saved the model checkpoint - model_checkpoints/dad/{model.__class__.__name__}_{epoch}.pth")
+    print("Best Frame avg precision: %.2f%%" % (best_ap))
+
+    model.train()
+    print("----1----")
+
+
+def main():
+    # Define training set
+    train_dataset = Dataset(
+        img_dataset_path=opt.img_dataset_path,
+        dataset_path=opt.dataset_path,
+        split_path=opt.split_path,
+        frame_batch_size=opt.batch_size,
+        ref_interval=opt.ref_interval,
+        objmap_file=opt.obj_mapping_file,
+        training=True,
+    )
+    train_dataloader = DataLoader(train_dataset, batch_size=opt.video_batch_size, shuffle=True, num_workers=8)
+
+    # Define test set
+    # test_dataset = Dataset(
+    #     img_dataset_path=opt.img_dataset_path,
+    #     dataset_path=opt.dataset_path,
+    #     split_path=opt.split_path,
+    #     frame_batch_size=opt.batch_size,
+    #     ref_interval=opt.ref_interval,
+    #     objmap_file=opt.obj_mapping_file,
+    #     training=False,
+    # )
+    test_dataset = CausalityInTrafficAccident(p, split='test', test_mode=True)
+
+    test_dataloader = DataLoader(test_dataset, batch_size=opt.test_video_batch_size, shuffle=False, num_workers=8)
+
+    # Define network
+    model = SpaceTempGoG_detr_dad(input_dim=opt.input_dim, embedding_dim=opt.embedding_dim,
+                                  img_feat_dim=opt.img_feat_dim, num_classes=opt.num_classes).to(device)
+    print("Model -->", model)
+
+    model.train()  ## Set the module in training mode.
+
+    total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"Total trainable parameters: {total_params}")
+
+    # Add weights from checkpoint model if specified
+    if opt.checkpoint_model:
+        model.load_state_dict(torch.load(opt.checkpoint_model))
+
+    if bool(opt.test_only):
+        print("=== Test Only Mode ===")
+        test_model(0, model, test_dataloader)
+        print("== Test Model completed ==")
+
+    learning_rate = 1e-4
+    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=5e-4)
+    scheduler = MultiStepLR(optimizer, milestones=[25], gamma=0.5)
+
+    # Training process
+    ttc = 0
+    for epoch in range(opt.num_epochs):
+
+        start = time.time()
+        epoch_metrics = {"c1_loss": []}
+
+        print(f"--- Epoch {epoch} ---")
+
+        loss, all_toa = 0, []
+
+        for batch_i, (
+        X, edge_index, y_true, img_feat, video_adj_list, edge_embeddings, temporal_adj_list, obj_vis_feat, batch_vec,
+        toa) in enumerate(train_dataloader):
+
+            # Processing the inputs from the dataloader
+            X = X.reshape(-1, X.shape[2])
+            img_feat = img_feat.reshape(-1, img_feat.shape[2])
+            edge_index = edge_index.reshape(-1, edge_index.shape[2])
+            edge_embeddings = edge_embeddings.view(-1, edge_embeddings.shape[-1])
+            video_adj_list = video_adj_list.reshape(-1, video_adj_list.shape[2])
+            temporal_adj_list = temporal_adj_list.reshape(-1, temporal_adj_list.shape[2])
+            y = y_true.reshape(-1)
+            toa = toa.item()
+
+            # pairwise cosine similarity between the objects
+            obj_vis_feat = obj_vis_feat.reshape(-1, obj_vis_feat.shape[-1]).to(device)
+            feat_sim = pairwise_cosine_similarity(obj_vis_feat + 1e-7, obj_vis_feat + 1e-7)
+            temporal_edge_w = feat_sim[temporal_adj_list[0, :], temporal_adj_list[1, :]]
+            batch_vec = batch_vec.view(-1).long()
+
+            X, edge_index, y, img_feat, video_adj_list = X.to(device), edge_index.to(device), y.to(device), img_feat.to(
+                device), video_adj_list.to(device)
+            temporal_adj_list, temporal_edge_w, edge_embeddings, batch_vec = temporal_adj_list.to(
+                device), temporal_edge_w.to(device), edge_embeddings.to(device), batch_vec.to(device)
+
+            # Get predictions from the model
+            logits, probs = model(X, edge_index, img_feat, video_adj_list, edge_embeddings, temporal_adj_list,
+                                  temporal_edge_w, batch_vec)
+
+            # Exclude the actual accident frames from the training
+            c_loss1 = cls_criterion(logits[:toa], y[:toa])
+            loss = loss + c_loss1
+
+            if (batch_i + 1) % 3 == 0:
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+                loss = 0
+
+            pred_labels = probs.argmax(1)
+            total_pred = (pred_labels == y).cpu().numpy().sum()
+
+            # Keep track of epoch metrics
+            epoch_metrics["c1_loss"].append(c_loss1.item())
+
+            if batch_i == 0:
+                all_probs_vid2 = probs[:, 1].detach().cpu().unsqueeze(0)
+                all_y_vid = torch.max(y).unsqueeze(0).cpu()  # y.cpu() #.unsqueeze(0)
             else:
-                feature_paths += [os.path.join(dataset_path, "testing", line)]
-        print("Feature paths :", feature_paths)
-        return feature_paths
+                all_probs_vid2 = torch.cat((all_probs_vid2, probs[:, 1].detach().cpu().unsqueeze(0)))
+                all_y_vid = torch.cat((all_y_vid, torch.max(y).unsqueeze(0).cpu()))
+            all_toa += [toa]
 
-    def _frame_number(self, feat_path):
+            if batch_i % 100 == 0:
+                print("[Epoch %d/%d] [Batch %d/%d] [CE Loss: %f (%f)] [LR : %.6f]"
+                      % (
+                          epoch,
+                          opt.num_epochs,
+                          batch_i,
+                          len(train_dataloader),
+                          c_loss1.item(),
+                          np.mean(epoch_metrics["c1_loss"]),
+                          optimizer.param_groups[0]['lr'],
+                      ))
 
-        """ Function to extract the frame number from the input
-        Input:
-        feat_path: Input path for a frame
+            # Empty cache
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
-        Returns:
-        Integer of the frame number (temporal position of a frame in a video)
+        end = time.time()
+        print(f"Time: {end - start}")
 
-        """
-        print("_frame_number :", int(feat_path.split('/')[-1].split('.mat')[0].split('_')[-1]))
-        return int(feat_path.split('/')[-1].split('.mat')[0].split('_')[-1])
+        # Print the avergae precision
+        _, ttc, _ = evaluation(all_probs_vid2.numpy(), all_y_vid.numpy(), all_toa)
 
-    def get_toa_all(self, annofile):
+        # Testing the model
+        test_model(epoch, model, test_dataloader)
 
-        """ Taken from baseline - https://github.com/Cogito2012/UString/blob/master/src/DataLoader.py
-        Function to TOA (time-to-accident) for the videos given the annotation file
-        Input:
-        annofile: Path to the annotation file provided by the dataset
+        scheduler.step()
 
-        Returns:
-        toa_dict: Dictionary containing the TOA for every video
 
-        """
-
-        toa_dict = {}
-        annoData = self.read_anno_file(annofile)
-        for anno in annoData:
-            labels = np.array(anno['label'], dtype=np.int8)
-            toa = np.where(labels == 1)[0][0]
-            toa = min(max(1, toa), self.n_frames - 1)
-            toa_dict[anno['vid']] = toa
-
-        print("get_toa_all :", toa_dict)
-        return toa_dict
-
-    def __getitem__(self, index):
-
-        feature_path = self.feature_paths[index % (len(self))]
-
-        # Load the data.npy (for features) and det.npy (for bounding boxes) files
-        all_data = np.load(f"{feature_path}")
-        all_feat = torch.from_numpy(all_data['data'])[:, 1:, :]
-        all_bbox = torch.from_numpy(
-            all_data['det']).float()  # (x1, y1, x2, y2, cls, accident/no acc)bottom left and top right coordinates
-
-        curr_vid_label = int(all_data['labels'][1])
-        if curr_vid_label > 0:
-            curr_toa = 90
-        else:
-            curr_toa = self.n_frames + 1
-
-        # Reading frame (i3d) features for the frames
-        if curr_vid_label > 0:
-            img_file = os.path.join(self.img_dataset_path, feature_path.split('/')[-2], "positive",
-                                    feature_path.split('/')[-1].split(".")[0][5:] + '.npy')
-        else:
-            img_file = os.path.join(self.img_dataset_path, feature_path.split('/')[-2], "negative",
-                                    feature_path.split('/')[-1].split(".")[0][5:] + '.npy')
-        all_img_feat = self.transform(np.load(img_file)).squeeze(0)
-
-        # Reading frame stats file
-        if curr_vid_label > 0:
-            frame_stats_file = os.path.join(self.frame_stats_path, feature_path.split('/')[-2], "positive",
-                                            feature_path.split('/')[-1].split(".")[0][5:] + '.npy')
-        else:
-            frame_stats_file = os.path.join(self.frame_stats_path, feature_path.split('/')[-2], "negative",
-                                            feature_path.split('/')[-1].split(".")[0][5:] + '.npy')
-        frame_stats = torch.from_numpy(np.load(frame_stats_file)).float()
-
-        # Calculating the bbox centers
-        cx, cy = (all_bbox[:, :, 0] + all_bbox[:, :, 2]) / 2, (all_bbox[:, :, 1] + all_bbox[:, :, 3]) / 2
-        all_obj_centers = torch.cat((cx.unsqueeze(2), cy.unsqueeze(2)), 2).float()
-
-        # Obj label indexes
-        all_obj_label_idxs = all_bbox[:, :, -2].long()
-
-        # ---------- Building the object-level spatio-temporal graph ---------------
-        video_data, edge_weights, edge_embeddings, obj_vis_feat = [], [], [], []
-        start_idx = 0
-        actual_frame_idx = 0
-        obj_refs = {}
-        num_objs_list = []
-
-        for i in range(all_feat.shape[0]):
-
-            obj_label_idxs, obj_feat, obj_centers = all_obj_label_idxs[i], all_feat[i], all_obj_centers[i]
-            num_objs = len(obj_label_idxs)
-
-            # Create the adj list (making big disconnected graph for one video)
-            # relation pair idxs
-            source_nodes = torch.arange(obj_label_idxs.shape[0]).unsqueeze(1).repeat(1,
-                                                                                     obj_label_idxs.shape[0]).flatten()
-            target_nodes = torch.arange(obj_label_idxs.shape[0]).unsqueeze(0).repeat(1,
-                                                                                     obj_label_idxs.shape[0]).flatten()
-            adj_list = torch.cat((source_nodes.unsqueeze(1), target_nodes.unsqueeze(1)), 1)
-            repeat_idx = torch.where(adj_list[:, 0] != adj_list[:, 1])[0]  # removing the self loops from the adj list
-            adj_list = adj_list[repeat_idx]
-            adj_list = torch.LongTensor(adj_list)
-            adj_list = adj_list.permute((1, 0))
-
-            # Edge embeddings - dist_rel, obj centers of source, obj centers of target
-            source_nodes, target_nodes = adj_list[0, :], adj_list[1, :]
-            obj_centers = obj_centers / frame_stats[i]  # normalize with frame height and width
-            source_centers = obj_centers[source_nodes]
-            target_centers = obj_centers[target_nodes]
-
-            dist_mat = torch.cdist(source_centers, target_centers).float()
-            dist_mat = F.softmax(-dist_mat, dim=-1)
-            dist_rel = dist_mat[adj_list[0, :], adj_list[1, :]].unsqueeze(1)
-
-            edge_embed = torch.cat((source_centers, target_centers, dist_rel), 1)
-
-            adj_list += start_idx
-
-            target = curr_vid_label  # Target
-
-            # Adding obj label embeddings to the node features
-            label_embeddings = self.obj_embeddings[obj_label_idxs]
-            x_embed = torch.cat((obj_feat, label_embeddings), 1)
-            frame_data = Data(x=x_embed, edge_index=adj_list, y=target)
-
-            video_data.append(frame_data)
-            edge_embeddings.append(edge_embed)
-            obj_vis_feat.append(obj_feat)
-
-            obj_refs['f_' + str(actual_frame_idx)] = {}
-            unique_obj_idxs = torch.unique(obj_label_idxs)
-            for obj_ in unique_obj_idxs:
-                idxx = torch.where(obj_label_idxs == obj_)[0] + start_idx
-                obj_refs['f_' + str(actual_frame_idx)][obj_.item()] = idxx
-
-            start_idx += num_objs
-
-            # keep track of num of objects for pooling to create graph-embedding later
-            num_objs_list += [torch.zeros(num_objs) + actual_frame_idx]
-            actual_frame_idx += 1
-
-        data, slices = InMemoryDataset.collate(video_data)
-        edge_embeddings = torch.cat(edge_embeddings)
-        obj_vis_feat = torch.cat(obj_vis_feat)
-        num_objs_list = torch.cat(num_objs_list)
-
-        # Generate the temporal connections adjacency matrix for the object-level graph
-        temporal_adj_list, temporal_edge_w = [], []
-        for i, (key_, value_) in enumerate(obj_refs.items()):
-            temporal_ref = min(i, self.temporal_ref)
-            curr_frame = obj_refs['f_' + str(i)]
-            for t_ in range(1, temporal_ref + 1):
-                prev_frame = obj_refs['f_' + str(i - t_)]
-                for obj_l, t_n in curr_frame.items():
-                    if obj_l in prev_frame:
-                        s_n = prev_frame[obj_l]  # source node idxs
-                        num_s = s_n.shape[0]
-                        # repeat all sources nodes length of target times - for example if source = [1, 2] and len(target)=2 it becomes [1,1,2,2]
-                        s_n = s_n.unsqueeze(0).repeat(len(t_n), 1).T.reshape(-1, 1)
-                        t_n = t_n.repeat(num_s).unsqueeze(1)  # repeat target source times directly
-                        s_t = torch.cat((s_n, t_n), 1)
-                        # temporal_edge_w.append(feat_sim[s_t[:, 0], s_t[:, 1]])    #choose the feature similarity as edge weight
-                        temporal_adj_list += s_t.tolist()
-
-        temporal_adj_list = torch.Tensor(temporal_adj_list).permute((1, 0)).long()
-
-        # Generate the frame-level adjacency matrix
-        video_adj_list = []
-        for i in range(len(video_data)):
-            bw_ref_interval = min(i, self.ref_interval)
-            for j in range(1, bw_ref_interval + 1, self.dilation_factor):
-                video_adj_list += [[i - j, i]]  # adding previous ref_interval neighbors
-        video_adj_list = torch.Tensor(video_adj_list).permute((1, 0)).long()
-
-        return data.x, data.edge_index, data.y, all_img_feat, video_adj_list, edge_embeddings, temporal_adj_list, obj_vis_feat, num_objs_list, curr_toa
-
-    def __len__(self):
-        return len(self.feature_paths)
+if __name__ == "__main__":
+    main()
