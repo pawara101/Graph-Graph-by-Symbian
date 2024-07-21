@@ -71,7 +71,7 @@ class Dataset(Dataset):
 				feature_paths += [os.path.join(dataset_path, "training", line)]
 			else: 
 				feature_paths += [os.path.join(dataset_path, "testing", line)]
-		print("Feature paths :",feature_paths)
+		# print("Feature paths :",feature_paths)
 		return feature_paths
 
 	def _frame_number(self, feat_path):
