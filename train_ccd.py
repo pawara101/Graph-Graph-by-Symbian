@@ -3,7 +3,8 @@ import numpy as np
 from models import *
 from dataset_ccd import *
 from torch.utils.data import DataLoader
-
+## Dataset : stores the samples and their corresponding labels
+## DataLoader : wraps an iterable around the Dataset to enable easy access to the samples
 import argparse
 import os 
 

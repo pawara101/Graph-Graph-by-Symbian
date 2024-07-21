@@ -62,7 +62,7 @@ def test_model(epoch, model, test_dataloader):
 """
 
 	global best_ap
-	print("--")
+	print("--Train DAD model--")
 	model.eval()
 	total_correct, total, all_toa = 0, 0, []
  

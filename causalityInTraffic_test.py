@@ -64,5 +64,5 @@ model.train()
 total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 print(f"Total trainable parameters: {total_params}")
 
-test_model(0, model, dataloader_test)
-print("Model test")
+# test_model(0, model, dataloader_test)
+# print("Model test")
