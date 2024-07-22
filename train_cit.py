@@ -22,3 +22,7 @@ from sklearn.metrics import confusion_matrix
 import time
 from sklearn.metrics import average_precision_score
 from eval_utils import evaluation
+
+from loaderData import CausalityInTrafficAccident
+
+dataset_test  = CausalityInTrafficAccident(p, split='test', test_mode=True)

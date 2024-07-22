@@ -52,17 +52,104 @@ print(dataset_test)
 dataloader_test = DataLoader(dataset_test, batch_size=p['batch_size'])
 print("Dataset Length :", len(dataset_test))
 
+print("====")
+# print(next(iter(dataloader_test)))
+
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+model = SpaceTempGoG_detr_dad(input_dim=4096, embedding_dim=256, img_feat_dim=2048, num_classes=2).to(device) ## Pre-trained model
 
-## Define Network
-model = SpaceTempGoG_detr_dad(input_dim=4096, embedding_dim=256, img_feat_dim=2048, num_classes=2).to(device)
-print("Model -->",model)
+def accuracy(output, target, topk=(1,)):
+    """Computes the precision@k for the specified values of k"""
+    maxk = max(topk)
+    batch_size = target.size(0)
 
-# Set the module in training mode.
-model.train()
+    _, pred = output.topk(maxk, 1, True, True)
+    pred = pred.t()
+    correct = pred.eq(target.view(1, -1).expand_as(pred))
 
-total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-print(f"Total trainable parameters: {total_params}")
+    res = []
+    for k in topk:
+        correct_k = correct[:k].view(-1).float().sum(0)
+        res.append(correct_k.mul_(100.0 / batch_size))
+    return res
+'''----------------------------------------------------------------'''
+class AverageMeter(object):
+    """Computes and stores the average and current value"""
+    def __init__(self):
+        self.reset()
 
-# test_model(0, model, dataloader_test)
-# print("Model test")
+    def reset(self):
+        self.val = 0
+        self.avg = 0
+        self.sum = 0
+        self.count = 0
+
+    def update(self, val, n=1):
+        self.val = val
+        self.sum += val * n
+        self.count += n
+        self.avg = self.sum / self.count
+
+
+#####################################################################
+# process_epoch
+#####################################################################
+def process_epoch(phase, _epoch, p, _dataloader, _model, _optim=None):
+    losses = AverageMeter()
+    top1_c = AverageMeter()
+    top2_c = AverageMeter()
+    top1_e = AverageMeter()
+    top2_e = AverageMeter()
+    top1_all = AverageMeter()
+    
+    if(phase == 'train'):
+        _model.train()
+    elif(phase == 'val'):
+        _model.eval()
+    elif(phase == 'test'):
+        _model.eval()
+        state_dict = torch.load(p['logdir'] + 'model_max.pth')
+        _model.load_state_dict(state_dict)
+
+    for iter, _data in enumerate(_dataloader):
+        feat_rgb, label_cause, label_effect = _data
+        batch_size = feat_rgb.size(0)
+        if(phase=='train'):
+            _optim.zero_grad()
+
+        loss, logits = _model.forward_all(feat_rgb.cuda(), [label_cause.cuda(), label_effect.cuda()])
+
+        if(phase=='train'):
+            loss.backward()
+            _optim.step()
+
+        # measure accuracy and record loss
+        prec1_c, prec2_c = accuracy(logits[0], label_cause.cuda(), topk=(1,2))
+        prec1_e, prec2_e = accuracy(logits[1], label_effect.cuda(), topk=(1,2))
+
+        losses.update(loss.item(), batch_size)
+        top1_c.update(prec1_c.item(), batch_size)
+        top2_c.update(prec2_c.item(), batch_size)
+        top1_e.update(prec1_e.item(), batch_size)
+        top2_e.update(prec2_e.item(), batch_size)
+
+        stats = dict()
+        stats['loss'] = losses.avg
+        stats['top1.cause'] = top1_c.avg
+        stats['top2.cause'] = top2_c.avg
+        stats['top1.effect'] = top1_e.avg
+        stats['top2.effect'] = top2_e.avg
+        return stats
+
+
+for batch_i, _data in enumerate(dataloader_test):
+    feat_rgb, label_cause, label_effect = _data
+    batch_size = feat_rgb.size(0)
+    print("Batch Size :", batch_size)
+    print("RGB Features :", feat_rgb.shape)
+    print("Label Cause :", label_cause.shape)
+
+    loss, logits = model.forward(feat_rgb.cuda(), [label_cause.cuda(), label_effect.cuda()])
+
+    stats_test = process_epoch('test', batch_i, p, dataloader_test, model)
+    print(stats_test)

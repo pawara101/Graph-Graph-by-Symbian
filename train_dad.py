@@ -165,7 +165,8 @@ def main():
 	)
 
 	test_dataloader = DataLoader(test_dataset, batch_size=opt.test_video_batch_size, shuffle=False, num_workers=8)
-
+	print("--------------------------------")
+	print(next(iter(test_dataloader)))
 	# Define network
 	model = SpaceTempGoG_detr_dad(input_dim=opt.input_dim, embedding_dim=opt.embedding_dim, img_feat_dim=opt.img_feat_dim, num_classes=opt.num_classes).to(device)
 	print("Model -->",model)
