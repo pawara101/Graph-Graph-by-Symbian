@@ -58,6 +58,8 @@ print("====")
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model = SpaceTempGoG_detr_dad(input_dim=4096, embedding_dim=256, img_feat_dim=2048, num_classes=2).to(device) ## Pre-trained model
 
+model_pretrained = torch.load("model_checkpoints/dad/SpaceTempGoG_detr_dad_6.pth")
+
 def accuracy(output, target, topk=(1,)):
     """Computes the precision@k for the specified values of k"""
     maxk = max(topk)

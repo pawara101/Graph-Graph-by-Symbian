@@ -48,7 +48,7 @@ class Dataset(Dataset):
 		self.nlp = spacy.load('en_core_web_md', disable=['ner', 'parser'])
 		self.obj_embeddings = torch.from_numpy(np.array([self.nlp(obj).vector for obj in self.idx_to_classes_obj]))
 
-	def _extract_feature_paths(self, dataset_path, split_path="splits_ccd/", training=True):
+	def _extract_feature_paths(self, dataset_path, split_path="splits_dad/", training=True):
 		
 		""" Function to extract paths to frames given the specified train/test split 
 		Input: 
