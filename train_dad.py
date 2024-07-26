@@ -44,6 +44,7 @@ parser.add_argument("--checkpoint_model", type=str, default="", help="Optional p
 opt = parser.parse_args()
 print("Arg Parsers : ", opt)
 
+torch.set_default_device('cuda')
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Torch device : {device} ==")
 # Classification criterion

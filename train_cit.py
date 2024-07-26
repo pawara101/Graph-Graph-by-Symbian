@@ -56,6 +56,7 @@ print("------------------")
 print(next(iter(dataloader_test)))
 print("------------------")
 
+torch.set_default_device('cuda')
 ## Select Device
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
