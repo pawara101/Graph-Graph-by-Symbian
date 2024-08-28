@@ -42,7 +42,7 @@ class Dataset(Dataset):
         self.temporal_ref = 1
         self.dilation_factor = 1
         self.topk = 10
-        self.frame_stats_path = "data/dad/frames_stats"  # (height, width)
+        self.frame_stats_path = "data/dashcam/frames_stats"  # (height, width)
         self.n_frames = 100
 
         # Obj label to word embeddings
@@ -50,7 +50,7 @@ class Dataset(Dataset):
         self.nlp = spacy.load('en_core_web_md', disable=['ner', 'parser'])
         self.obj_embeddings = torch.from_numpy(np.array([self.nlp(obj).vector for obj in self.idx_to_classes_obj]))
 
-    def _extract_feature_paths(self, dataset_path, split_path="splits_ccd/", training=True):
+    def _extract_feature_paths(self, dataset_path, split_path="splits_dash/", training=True):
 
         """ Function to extract paths to frames given the specified train/test split
         Input:
