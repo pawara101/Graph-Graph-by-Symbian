@@ -25,7 +25,7 @@ from eval_utils import evaluation
 torch.manual_seed(0)   #3407
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--dataset_path", type=str, default="data/ccd/obj_feat/", help="Path to sgg feature data")
+parser.add_argument("--dataset_path", type=str, default="data/ccd/obj_data/", help="Path to sgg feature data")
 parser.add_argument("--img_dataset_path", type=str, default="data/ccd/i3d_feat/", help="Path to I3D feature data")
 parser.add_argument("--obj_mapping_file", type=str, default="data/ccd/idx_to_labels_obj.json", help="path to object label mapping file")
 parser.add_argument("--toa_file", type=str, default="data/ccd/Crash-1500.txt", help="path to annotation file")

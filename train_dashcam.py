@@ -131,6 +131,7 @@ def test_model(epoch, model, test_dataloader):
 
     # Saving checkpoint
     if avg_prec > best_ap:
+        print("saving checkpoint")
         best_ap = avg_prec
         os.makedirs("model_checkpoints/dad", exist_ok=True)
         torch.save(model.state_dict(), f"model_checkpoints/dad/{model.__class__.__name__}_{epoch}.pth")
